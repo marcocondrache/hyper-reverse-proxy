@@ -4,6 +4,7 @@
 extern crate tracing;
 
 use http_body_util::{BodyExt, Empty};
+use hyper::body::Body;
 use hyper::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::http::header::{InvalidHeaderValue, ToStrError};
 use hyper::http::uri::InvalidUri;
@@ -321,12 +322,18 @@ fn get_upstream_addr(forward_uri: &str) -> Result<SocketAddr, ProxyError> {
 
 type ResponseBody = http_body_util::combinators::UnsyncBoxBody<hyper::body::Bytes, std::io::Error>;
 
-pub async fn call<'a, T: Connect + Clone + Send + Sync + 'static>(
+pub async fn call<'a, T, B>(
     client_ip: IpAddr,
     forward_uri: &str,
-    request: Request<Incoming>,
-    client: &'a Client<T, Incoming>,
-) -> Result<Response<ResponseBody>, ProxyError> {
+    request: Request<B>,
+    client: &'a Client<T, B>,
+) -> Result<Response<ResponseBody>, ProxyError>
+where
+    T: Connect + Clone + Send + Sync + 'static,
+    B: Body + Send + Unpin + 'static,
+    <B as Body>::Data: Send,
+    <B as Body>::Error: std::error::Error + Send + Sync,
+{
     debug!(
         "Received proxy call from {} to {}, client: {}",
         request.uri().to_string(),
@@ -346,7 +353,7 @@ pub async fn call<'a, T: Connect + Clone + Send + Sync + 'static>(
 
         debug!("Responding to call with response");
         return Ok(create_proxied_response(
-            response.map(|body| body.map_err(std::io::Error::other).boxed_unsync()),
+            response.map(|body: Incoming| body.map_err(std::io::Error::other).boxed_unsync()),
         ));
     }
 
@@ -406,12 +413,24 @@ pub async fn call<'a, T: Connect + Clone + Send + Sync + 'static>(
 }
 
 #[derive(Debug, Clone)]
-pub struct ReverseProxy<T: Connect + Clone + Send + Sync + 'static> {
-    client: Client<T, Incoming>,
+pub struct ReverseProxy<T, B>
+where
+    T: Connect + Clone + Send + Sync + 'static,
+    B: Body + Send + Unpin + 'static,
+    <B as Body>::Data: Send,
+    <B as Body>::Error: std::error::Error + Send + Sync,
+{
+    client: Client<T, B>,
 }
 
-impl<T: Connect + Clone + Send + Sync + 'static> ReverseProxy<T> {
-    pub fn new(client: Client<T, Incoming>) -> Self {
+impl<T, B> ReverseProxy<T, B>
+where
+    T: Connect + Clone + Send + Sync + 'static,
+    B: Body + Send + Unpin + 'static,
+    <B as Body>::Data: Send,
+    <B as Body>::Error: std::error::Error + Send + Sync,
+{
+    pub fn new(client: Client<T, B>) -> Self {
         Self { client }
     }
 
@@ -419,9 +438,9 @@ impl<T: Connect + Clone + Send + Sync + 'static> ReverseProxy<T> {
         &self,
         client_ip: IpAddr,
         forward_uri: &str,
-        request: Request<Incoming>,
+        request: Request<B>,
     ) -> Result<Response<ResponseBody>, ProxyError> {
-        call::<T>(client_ip, forward_uri, request, &self.client).await
+        call::<T, B>(client_ip, forward_uri, request, &self.client).await
     }
 }
 
